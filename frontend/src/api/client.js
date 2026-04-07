@@ -51,8 +51,85 @@ export async function getFiles(domain) {
   return request(`/files/${encodeURIComponent(domain)}`);
 }
 
-// --- File Upload (multipart) ---
-export async function uploadFile(domain, fileType, file) {
+// Vercel serverless hard limit is 4.5 MB per request.
+// We split at 3.5 MB to stay well under it.
+const CHUNK_SIZE = 3_500_000; // 3.5 MB in bytes
+
+export async function uploadFile(domain, fileType, file, onProgress) {
+  // ── Safety check: reject obviously wrong files early ──────────────────────
+  if (!file.name.toLowerCase().endsWith('.csv')) {
+    throw new Error('Only .csv files are accepted.');
+  }
+
+  // ── Small file: single request (under 3.5 MB) ─────────────────────────────
+  if (file.size <= CHUNK_SIZE) {
+    return _uploadSingle(domain, fileType, file);
+  }
+
+  // ── Large file: chunked upload ────────────────────────────────────────────
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+  // Upload each chunk
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, file.size);
+    const chunk = file.slice(start, end);
+
+    const formData = new FormData();
+    formData.append('domain', domain);
+    formData.append('file_type', fileType);
+    formData.append('chunk_index', String(i));
+    formData.append('total_chunks', String(totalChunks));
+    formData.append('file', chunk, file.name);
+
+    let res;
+    try {
+      res = await fetch(`${BASE}/upload-chunk`, { method: 'POST', body: formData });
+    } catch (networkErr) {
+      throw new Error(`Upload failed on chunk ${i + 1}/${totalChunks}: could not reach the server.`);
+    }
+
+    const data = await _safeJson(res, `Chunk ${i + 1}/${totalChunks} upload`);
+    if (!res.ok) {
+      throw new Error(data.error || `Chunk ${i + 1} failed (HTTP ${res.status})`);
+    }
+
+    // Report progress as a 0–90 percentage (finalize takes the last 10%)
+    if (onProgress) {
+      onProgress(Math.round(((i + 1) / totalChunks) * 90));
+    }
+  }
+
+  // ── Finalize: assemble chunks on the server ───────────────────────────────
+  let res;
+  try {
+    res = await fetch(`${BASE}/upload-finalize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        domain,
+        file_type: fileType,
+        total_chunks: totalChunks,
+        filename: file.name,
+      }),
+    });
+  } catch (networkErr) {
+    throw new Error('Upload failed during final assembly: could not reach the server.');
+  }
+
+  const data = await _safeJson(res, 'Upload finalize');
+  if (!res.ok) {
+    throw new Error(data.error || `Finalize failed (HTTP ${res.status})`);
+  }
+
+  if (onProgress) onProgress(100);
+  return data;
+}
+
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+async function _uploadSingle(domain, fileType, file) {
   const formData = new FormData();
   formData.append('domain', domain);
   formData.append('file_type', fileType);
@@ -60,45 +137,39 @@ export async function uploadFile(domain, fileType, file) {
 
   let res;
   try {
-    res = await fetch(`${BASE}/upload`, {
-      method: 'POST',
-      body: formData,
-      // No Content-Type header — browser sets multipart boundary automatically
-    });
+    res = await fetch(`${BASE}/upload`, { method: 'POST', body: formData });
   } catch (networkErr) {
     throw new Error('Upload failed: could not reach the server. Check your connection.');
   }
 
-  // Safe body parsing — server may return HTML on gateway errors (413, 502, etc.)
-  let data;
-  const contentType = res.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    data = await res.json();
-  } else {
-    const text = await res.text();
-    // Convert known plain-text server errors to readable messages
-    if (res.status === 413 || text.toLowerCase().includes('too large')) {
-      throw new Error('File is too large. Maximum upload size is 50 MB.');
-    }
-    if (!res.ok) {
-      throw new Error(
-        `Upload failed (HTTP ${res.status}). ` +
-        'The server returned an unexpected response. Try again or use a smaller file.'
-      );
-    }
-    // Successful but non-JSON (shouldn't happen, but handle gracefully)
-    data = { message: 'Uploaded successfully' };
-  }
-
+  const data = await _safeJson(res, 'Upload');
   if (!res.ok) {
-    const error = new Error(data.error || `Upload failed (HTTP ${res.status})`);
-    error.status = res.status;
-    error.data = data;
-    throw error;
+    throw new Error(data.error || `Upload failed (HTTP ${res.status})`);
   }
-
   return data;
 }
+
+async function _safeJson(res, label) {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return res.json();
+  }
+  const text = await res.text();
+  if (res.status === 413 || text.toLowerCase().includes('too large')) {
+    throw new Error(
+      'A file chunk exceeded the server limit. ' +
+      'This is unexpected — please contact support.'
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `${label} failed (HTTP ${res.status}). ` +
+      'The server returned an unexpected response. Please try again.'
+    );
+  }
+  return {};
+}
+
 
 // --- Step 2: Clean & Process ---
 
