@@ -33,7 +33,10 @@ def create_app():
 
     # Configuration
     app.config["DEBUG"] = DEBUG
-    app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB max upload
+    # Vercel serverless hard limit is 4.5 MB per request.
+    # Chunks are sent at 3.5 MB each, so 4 MB gives a safe buffer.
+    # For local dev this limit still applies — files are split on the frontend.
+    app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024  # 4 MB per request
     app.config["UPLOAD_FOLDER"] = UPLOAD_DIR
     app.config["OUTPUT_FOLDER"] = OUTPUT_DIR
 
