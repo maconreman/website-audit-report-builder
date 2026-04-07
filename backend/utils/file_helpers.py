@@ -115,10 +115,31 @@ def save_upload(domain, suffix_key, file_content):
 
 
 def read_csv_safe(filepath, **kwargs):
-    """Read a CSV with error handling."""
+    """
+    Read a CSV with encoding fallback.
+    Screaming Frog exports UTF-8-BOM or Windows-1252.
+    Tries utf-8-sig first (handles BOM), then latin-1 (handles all single-byte).
+    """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
-    return pd.read_csv(filepath, **kwargs)
+
+    encodings = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
+    last_error = None
+
+    for enc in encodings:
+        try:
+            return pd.read_csv(filepath, encoding=enc, **kwargs)
+        except UnicodeDecodeError as e:
+            last_error = e
+            continue
+        except Exception:
+            raise  # surface non-encoding errors immediately
+
+    raise ValueError(
+        f"Could not read CSV — tried encodings {encodings}. "
+        f"Last error: {last_error}. "
+        "Re-export the file as UTF-8 from Screaming Frog."
+    )
 
 
 def save_csv(df, filepath):
