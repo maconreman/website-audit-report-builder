@@ -60,6 +60,13 @@ def run_step3(domain):
     if 'Address_Normalized' in df_audit.columns:
         df_audit = df_audit.drop(columns=['Address_Normalized'])
 
+    # Final duplicate guard — catches any regression from future merge changes
+    before_dedup = len(df_audit)
+    df_audit = df_audit.drop_duplicates(subset=['Address'], keep='first')
+    after_dedup = len(df_audit)
+    if before_dedup != after_dedup:
+        logs.append({"type": "warning", "message": f"  Removed {before_dedup - after_dedup} duplicate rows after merge"})
+
     # Save
     update_session(domain, {"audit_records": df_audit.to_dict(orient="records")})
     output_path = get_output_path(domain, "audit")
@@ -104,9 +111,39 @@ def _merge_ga4_organic(domain, df_audit, logs):
         inplace=True,
     )
 
-    # Merge
+    # FIX 1: Deduplicate GA4 on Address_Normalized before merging.
+    # GA4 exports can contain the same landing page multiple times (trailing slash
+    # variants, query strings that normalize identically, or channel sub-rows).
+    # A left join against a non-unique right key multiplies rows 1:N — this is
+    # the primary source of the 23 duplicate rows reported.
+    # Strategy: keep the row with the highest Sessions/Organic Traffic value,
+    # which represents the most complete traffic picture for that URL.
+    rows_before_dedup = len(df_ga4_filtered)
+    sort_col = 'Organic Traffic' if 'Organic Traffic' in df_ga4_filtered.columns else (
+                'Sessions' if 'Sessions' in df_ga4_filtered.columns else None)
+    if sort_col:
+        df_ga4_filtered = (
+            df_ga4_filtered
+            .sort_values(sort_col, ascending=False)
+            .drop_duplicates(subset=['Address_Normalized'], keep='first')
+        )
+    else:
+        df_ga4_filtered = df_ga4_filtered.drop_duplicates(subset=['Address_Normalized'], keep='first')
+
+    rows_after_dedup = len(df_ga4_filtered)
+    dupes_removed = rows_before_dedup - rows_after_dedup
+    if dupes_removed > 0:
+        logs.append({"type": "info", "message": f"  Deduplicated GA4: removed {dupes_removed} duplicate URL rows before merge"})
+
+    # Merge — left join; df_audit rows must not increase
     rows_before = len(df_audit)
     df_merged = df_audit.merge(df_ga4_filtered, on='Address_Normalized', how='left')
+    rows_after = len(df_merged)
+
+    if rows_after != rows_before:
+        # Should never happen after dedup — log a warning and force-dedup
+        logs.append({"type": "warning", "message": f"  GA4 merge expanded rows {rows_before} → {rows_after}; deduplicating on Address"})
+        df_merged = df_merged.drop_duplicates(subset=['Address'], keep='first')
 
     matched_rows = 0
     if 'Organic Traffic' in df_merged.columns:
@@ -121,6 +158,7 @@ def _merge_ga4_organic(domain, df_audit, logs):
     doc_info = {
         "rows_merged": len(df_ga4),
         "rows_matched": matched_rows,
+        "ga4_dupes_removed": dupes_removed,
         "columns_deleted": deleted_cols,
         "columns_renamed": GA4_RENAME_MAP,
     }
@@ -142,12 +180,12 @@ def _merge_external_links(domain, df_audit, logs):
     # Find target page column
     target_col = None
     for col in df_external.columns:
-        if 'target' in col.lower() and 'page' in col.lower():
+        if 'target' in str(col).lower() and 'page' in str(col).lower():
             target_col = col
             break
     if target_col is None:
         for col in df_external.columns:
-            if col.lower() in ['target', 'target page', 'target url', 'url']:
+            if str(col).lower() in ['target', 'target page', 'target url', 'url']:
                 target_col = col
                 break
 
@@ -162,11 +200,40 @@ def _merge_external_links(domain, df_audit, logs):
     cols_to_remove = ['Incoming links', target_col]
     df_ext_filtered = df_external.drop(
         columns=[c for c in cols_to_remove if c in df_external.columns]
-    )
+    ).copy()
 
-    # Merge
+    # FIX 2: Deduplicate External Links on Address_Normalized before merging.
+    # GSC "Top linked pages" can list the same target page on multiple rows
+    # (e.g., one row per linking domain). A non-unique right key causes the
+    # same SF row to be duplicated once per matching external links row.
+    # Strategy: aggregate Linking Sites by taking the max (largest count wins).
+    rows_before_dedup = len(df_ext_filtered)
+    linking_col = 'Linking Sites' if 'Linking Sites' in df_ext_filtered.columns else None
+
+    if linking_col:
+        # Convert to numeric first so max() is meaningful
+        df_ext_filtered[linking_col] = pd.to_numeric(df_ext_filtered[linking_col], errors='coerce').fillna(0)
+        df_ext_filtered = (
+            df_ext_filtered
+            .sort_values(linking_col, ascending=False)
+            .drop_duplicates(subset=['Address_Normalized'], keep='first')
+        )
+    else:
+        df_ext_filtered = df_ext_filtered.drop_duplicates(subset=['Address_Normalized'], keep='first')
+
+    rows_after_dedup = len(df_ext_filtered)
+    dupes_removed = rows_before_dedup - rows_after_dedup
+    if dupes_removed > 0:
+        logs.append({"type": "info", "message": f"  Deduplicated External Links: removed {dupes_removed} duplicate URL rows before merge"})
+
+    # Merge — left join; df_audit rows must not increase
     rows_before = len(df_audit)
     df_merged = df_audit.merge(df_ext_filtered, on='Address_Normalized', how='left')
+    rows_after = len(df_merged)
+
+    if rows_after != rows_before:
+        logs.append({"type": "warning", "message": f"  External links merge expanded rows {rows_before} → {rows_after}; deduplicating on Address"})
+        df_merged = df_merged.drop_duplicates(subset=['Address'], keep='first')
 
     ext_cols = [c for c in df_ext_filtered.columns if c != 'Address_Normalized']
     matched_rows = 0
@@ -183,6 +250,7 @@ def _merge_external_links(domain, df_audit, logs):
     doc_info = {
         "rows_in_source": len(df_external),
         "target_column_used": target_col,
+        "ext_dupes_removed": dupes_removed,
         "columns_removed": removed_cols,
     }
 
