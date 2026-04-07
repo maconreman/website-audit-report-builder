@@ -50,17 +50,24 @@ def normalize_trailing_slash(url, should_have_slash):
     Normalize URL trailing slash based on site convention.
     Original: normalize_trailing_slash()
     """
-    if pd.isna(url) or not url:
+    # FIX: Explicit isinstance check before any string method — catches float NaN
+    # that slip past `pd.isna()` in some pandas versions, and non-string types
+    if url is None:
+        return url
+    if not isinstance(url, str):
+        if pd.isna(url):
+            return url
+        url = str(url)
+    if not url.strip():
         return url
 
-    url_str = str(url)
-    has_slash = url_str.endswith("/")
+    has_slash = url.endswith("/")
 
     if should_have_slash and not has_slash:
-        return url_str + "/"
+        return url + "/"
     if not should_have_slash and has_slash:
-        return url_str.rstrip("/")
-    return url_str
+        return url.rstrip("/")
+    return url
 
 
 def detect_trailing_slash_convention(sample_url):
