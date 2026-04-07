@@ -25,16 +25,39 @@ function UploadZone({ fileType, domain, isUploaded, onUploaded, disabled }) {
   const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState('')
   const [fileName, setFileName] = useState('')
+  const [progress, setProgress] = useState(0);
   const inputRef = useRef(null)
 
-  const handleFile = async (file) => {
-    if (!file) return
-    if (!file.name.endsWith('.csv')) { setError('Only .csv files accepted'); return }
-    setIsUploading(true); setError(''); setFileName(file.name)
-    try { await uploadFile(domain, fileType.key, file); onUploaded() }
-    catch (err) { setError(err.message); setFileName('') }
-    finally { setIsUploading(false) }
+// 200 MB hard cap: anything above this is almost certainly wrong
+const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024;
+
+const handleFile = async (file) => {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.csv')) {
+    setError('Only .csv files are accepted.');
+    return;
   }
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    setError('File exceeds 200 MB. Export a smaller date range from Screaming Frog.');
+    return;
+  }
+
+  setIsUploading(true);
+  setError('');
+  setFileName(file.name);
+  setProgress(0);
+
+  try {
+    await uploadFile(domain, fileType.key, file, (pct) => setProgress(pct));
+    onUploaded();
+  } catch (err) {
+    setError(err.message);
+    setFileName('');
+  } finally {
+    setIsUploading(false);
+    setProgress(0);
+  }
+};
 
   return (
     <div
