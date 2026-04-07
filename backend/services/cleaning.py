@@ -244,13 +244,36 @@ def clean_ga4_organic(domain):
     except FileNotFoundError:
         logs.append({"type": "info", "message": "GA4 Organic file not found, skipping..."})
         return logs
+
     logs.append({"type": "info", "message": f"Processing GA4 Organic: {len(df_ga4)} rows"})
-    url_prefix = session.get("url_prefix", "")
+
+    # FIX 1: Guard against url_prefix being None (extract_url_prefix can return None)
+    url_prefix = session.get("url_prefix") or ""
     has_trailing_slash = session.get("has_trailing_slash", False)
-    if 'Landing page' in df_ga4.columns:
-        landing_page = df_ga4['Landing page'].astype(str).apply(lambda x: x if x.startswith('/') else '/' + x)
+
+    # FIX 2: Accept both 'Landing page' (GA4 UI export) and 'Landing Page' (some API exports)
+    landing_col = None
+    for candidate in ['Landing page', 'Landing Page', 'landing_page', 'Page']:
+        if candidate in df_ga4.columns:
+            landing_col = candidate
+            break
+
+    if landing_col is not None:
+        # FIX 3: Cast to str FIRST, then apply string logic — never call .startswith on raw column
+        landing_page = (
+            df_ga4[landing_col]
+            .fillna('')           # replace NaN floats with empty string
+            .astype(str)          # guarantee str type before any string method
+            .str.strip()
+            .apply(lambda x: ('/' + x) if x and not x.startswith('/') else (x or '/'))
+        )
         df_ga4['Address'] = url_prefix + landing_page
-        df_ga4['Address'] = df_ga4['Address'].apply(lambda x: normalize_trailing_slash(x, has_trailing_slash))
+        df_ga4['Address'] = df_ga4['Address'].apply(
+            lambda x: normalize_trailing_slash(x, has_trailing_slash)
+        )
+    else:
+        logs.append({"type": "info", "message": "  Warning: could not find Landing page column in GA4 export"})
+
     df_ga4['Address_Normalized'] = df_ga4['Address'].apply(normalize_url_for_matching)
     cleaned_path = get_output_path(domain, "ga4_cleaned")
     save_csv(df_ga4, cleaned_path)
