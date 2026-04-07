@@ -71,7 +71,8 @@ def configure_old_content(domain, enabled, cutoff_year=None, date_field=None):
 
         if date_field in df.columns:
             def is_old_content(row):
-                if row.get('Action', '') != '' and row.get('Action', '') != 'Review':
+                action_val = str(row.get('Action', '') or '')
+                if action_val != '' and action_val != 'Review':
                     return False
                 date_val = row.get(date_field)
                 if pd.isna(date_val) or not date_val:
