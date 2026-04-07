@@ -50,9 +50,10 @@ def run_step2(domain):
     if len(df_sf_200) == 0:
         raise ValueError("No HTML pages with status 200 found in the SF crawl.")
 
-    sample_url = str(df_sf_200['Address'].iloc[0])
+    # FIX: dropna() before iloc[0] — Address column can have NaN values
+    sample_url = str(df_sf_200['Address'].dropna().iloc[0])
     has_trailing_slash = sample_url.endswith('/')
-    url_prefix = extract_url_prefix(sample_url)
+    url_prefix = extract_url_prefix(sample_url) or ""
     logs.append({"type": "info", "message": f"URL prefix: {url_prefix}, trailing slash: {'Yes' if has_trailing_slash else 'No'}"})
 
     update_session(domain, {
