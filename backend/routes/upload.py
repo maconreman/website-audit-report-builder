@@ -74,9 +74,42 @@ def upload_file():
     if not file.filename.endswith(".csv"):
         return jsonify({"error": "Only CSV files are accepted"}), 400
 
+    
     try:
         content = file.read()
         saved_path = save_upload(domain, file_type, content)
+
+        # --- Validate the CSV is readable immediately after save ---
+        try:
+            from backend.utils.file_helpers import read_csv_safe
+            df_check = read_csv_safe(saved_path, nrows=3)
+        except Exception as read_err:
+            import os as _os
+            _os.remove(saved_path)          # remove corrupt file
+            return jsonify({
+                "error": (
+                    f"The uploaded file could not be read as a valid CSV. "
+                    f"Details: {read_err}. "
+                    "Re-export from Screaming Frog and try again."
+                )
+            }), 422
+
+        # --- SF-specific column check ---
+        if file_type == "sf":
+            required_sf_cols = {"Address", "Status Code", "Content Type"}
+            # Screaming Frog sometimes names it "Content-Type"
+            actual_cols = set(df_check.columns)
+            missing = required_sf_cols - actual_cols
+            if missing:
+                import os as _os
+                _os.remove(saved_path)
+                return jsonify({
+                    "error": (
+                        f"Screaming Frog file is missing required columns: {sorted(missing)}. "
+                        "Make sure you exported 'All' (not 'Internal') and that the GA4 "
+                        "integration was connected before crawling."
+                    )
+                }), 422
 
         return jsonify({
             "message": f"Uploaded {VALID_UPLOAD_TYPES[file_type]} file for {clean_domain(domain)}",
